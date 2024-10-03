@@ -29,25 +29,23 @@ class DbCreator:
     CREATE_TABLE_WORD_LOCATION = """
     CREATE TABLE IF NOT EXISTS word_location (
         id INTEGER PRIMARY KEY,
-        fkWordId INT,
-        fkUrlId INT,
+        fkWordId INT FOREIGN KEY REFERENCES word_list(wordId) ON DELETE CASCADE ON UPDATE CASCADE,
+        fkUrlId INT FOREIGN KEY REFERENCES url_list(urlId) ON DELETE CASCADE ON UPDATE CASCADE,
         location INT
     )
     """
     CREATE_TABLE_LINK_BETWEEN_URL = """
-    -- откуда-куда ссылки
     CREATE TABLE IF NOT EXISTS link_between_url (
         linkId INTEGER PRIMARY KEY,
-        fkFromUrlId INT,
-        fkToUrlId INT
+        fkFromUrlId INT FOREIGN KEY REFERENCES url_list(urlId) ON DELETE CASCADE ON UPDATE CASCADE,
+        fkToUrlId INT FOREIGN KEY REFERENCES url_list(urlId) ON DELETE CASCADE ON UPDATE CASCADE
     )
     """
     CREATE_TABLE_LINK_WORD = """
-    -- таблица слов использующихся в ссылках (tag 'a')
     CREATE TABLE IF NOT EXISTS link_word (
         id INTEGER PRIMARY KEY,
-        fkWordId INT,
-        fkLinkId INT
+        fkWordId INT FOREIGN KEY REFERENCES word_list(wordId) ON DELETE CASCADE ON UPDATE CASCADE,
+        fkLinkId INT FOREIGN KEY REFERENCES link_between_url(linkId) ON DELETE CASCADE ON UPDATE CASCADE
     )
     """
 
