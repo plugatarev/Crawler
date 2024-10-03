@@ -7,11 +7,9 @@ import sqlalchemy
 from loguru import logger
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from tabulate import tabulate
 
-from src.entities import Element, WordLocationsCombination
-from src.settings import DATABASE_FILENAME
-from src.utils import Decorators
+from src.entity import Element, WordLocationsCombination
+from src.settings import DATABASE_FILENAME, IGNORED_WORDS
 
 
 class DbCreator:
@@ -57,7 +55,7 @@ class DbCreator:
     SELECT COUNT(name) FROM sqlite_master WHERE type='table'
     """
 
-    TOTAL_TABLES_COUNT = 6
+    TOTAL_TABLES_COUNT = 5
 
     @classmethod
     def initialize_db(cls, session) -> None:
@@ -214,7 +212,7 @@ class DbActor:
                 )
             )
 
-    def get_stat(self, urls_crawled: int):
+    def fill_stat(self, urls_crawled: int):
         result = self.db.execute(self.SELECT_TABLE_SIZE_STATS)
         result = result.fetchall()
         data = []
@@ -257,7 +255,6 @@ class DbActor:
     def _get_last_insert_rowid(self) -> int:
         return self.db.execute("SELECT last_insert_rowid();").fetchall()[0][0]
 
-    @Decorators.timing
     def insert_links_from_elements(self, elements: List[Element]) -> None:
         last_url_id = self._get_last_url_id() or 0
         list_of_values = ""
@@ -283,7 +280,6 @@ class DbActor:
         )
         self.db.commit()
 
-    @Decorators.timing
     def insert_words_from_elements(self, elements: List[Element]) -> None:
         last_word_id = self._get_last_word_id() or 0
         values_list = ""
@@ -291,7 +287,9 @@ class DbActor:
             if not element.word:
                 continue
             safe_word = element.word.replace("'", "")
-            values_list += f"('{safe_word}', 0),"
+            if safe_word in IGNORED_WORDS:
+                continue
+            values_list += f"('{safe_word}'),"
             last_word_id += 1
             element.word_id = last_word_id
         values_list = values_list.strip(",")
@@ -300,7 +298,6 @@ class DbActor:
         )
         self.db.commit()
 
-    @Decorators.timing
     def insert_links_between_by_elements(
         self, elements: List[Element], original_link_id: int
     ) -> None:
@@ -319,7 +316,6 @@ class DbActor:
         self.db.execute(query)
         self.db.commit()
 
-    @Decorators.timing
     def fill_words_locations_by_elements(self, elements: List[Element], url_id: int):
         values_list = ""
         for element in elements:
@@ -329,7 +325,6 @@ class DbActor:
         self.db.execute(query)
         self.db.commit()
 
-    @Decorators.timing
     def fill_link_words_by_elements(self, elements: List[Element]):
         list_of_values = ""
         for element in elements:
