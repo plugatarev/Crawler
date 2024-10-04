@@ -10,25 +10,28 @@ from typing import List
 
 import aiohttp
 import bs4
-import requests
 from bs4 import BeautifulSoup, Comment
 from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.database import DbActor
-from src.entities import Element, FetchedUrl, LinkToGo
-from src.settings import CSV_STAT_FILENAME, DATABASE_FILENAME
-from src.utils import Decorators
+from src.model import Element, FetchedUrl, LinkToGo
+from src.settings import STATISTICS_FILENAME, DATABASE_FILENAME
+
+
+def start_crawler():
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(DATABASE_FILENAME)
+        os.remove(STATISTICS_FILENAME)
+
+    Crawler().start_crawl()
 
 
 class Crawler:
-    START_URL_LIST = [
-        LinkToGo("https://ngs.ru/"),
-        LinkToGo("https://lenta.ru/")
-    ]
+    START_URL_LIST = [LinkToGo("https://ngs.ru/"), LinkToGo("https://lenta.ru/")]
     MAX_DEPTH = 2
-    FETCH_SLEEP_INTERVAL = 0.25
-    MAX_RETRIES_COUNT = 3
+    FETCH_EXCEPTION_SLEEP_INTERVAL = 0.25
+    FETCH_MAX_RETRIES_COUNT = 3
     FETCH_BATCH_SIZE = 30
     FETCH_TOTAL_TIMEOUT = 10
     FETCH_CONNECT_TIMEOUT = 2
@@ -36,42 +39,24 @@ class Crawler:
     IDLE_COUNT_BEFORE_EXIT = 3
     STAT_INTERVAL = 2
 
-    def __init__(
-        self, url_list: List[LinkToGo] = START_URL_LIST, depth=MAX_DEPTH
-    ) -> None:
+    def __init__(self, url_list=START_URL_LIST, depth=MAX_DEPTH) -> None:
         for url in url_list:
             url.link = url.link.strip("/")
         self.start_url_list = url_list[:]
-        self.urls_to_crawl: List[LinkToGo] = url_list[:]
-        self.crawled_urls: List[str] = []
+        self.urls_to_crawl = url_list[:]
+        self.crawled_urls = []
         self.depth = depth
         self.db = DbActor()
         self.crawl_count = 0
-        self.start_time = datetime.datetime.utcnow()
-        self.error_processed_urls: List[str] = []
+        self.start_time = datetime.datetime.now(datetime.timezone.utc)
+        self.error_processed_urls = []
         self.pages_to_process: List[FetchedUrl] = []
         self.stop_flag = False
+        self.parser = Parser()
 
-    @staticmethod
-    def create_stat_csv():
-        with open("stat.csv", "w") as csv_file:
-            writer = csv.writer(csv_file)
-            writer.writerow(
-                [
-                    "iterations_count",
-                    "link_between",
-                    "link_word",
-                    "url_list",
-                    "word_list",
-                    "word_location",
-                    "unique_words_count",
-                ]
-            )
-
-    @Decorators.timing
     def start_crawl(self):
         logger.info(f"Starting web crawler ... urls_to_crawl={self.urls_to_crawl}")
-        self.create_stat_csv()
+        self._create_stat_csv()
         try:
             fetch_thread = threading.Thread(target=self.async_fetch_urls)
             fetch_thread.start()
@@ -92,16 +77,16 @@ class Crawler:
                     continue
                 self._crawl_iteration(page_to_process)
         except KeyboardInterrupt:
-            logger.info("Crawler was stoped by user.")
+            logger.info("Crawler was stopped by user")
             self.stop_flag = True
         except Exception as e:
             logger.exception(e)
-            logger.critical(f"unexpected end of crawling - {e}")
+            logger.critical(f"Unexpected end of crawling - {e}")
         finally:
             logger.debug("Wait fetch thread to end ...")
             fetch_thread.join()
             logger.success(
-                f"Finished crawl. Crawled pages: {self.crawl_count}. Time ellapsed: {(datetime.datetime.utcnow() - self.start_time).seconds / 60 :.2f} min. Started from: {self.start_url_list}"
+                f"Crawl finished. Crawled pages: {self.crawl_count}. Time elapsed: {(datetime.datetime.now(datetime.timezone.utc) - self.start_time).seconds / 60 :.2f} min. Started from: {self.start_url_list}"
             )
             if self.error_processed_urls:
                 logger.warning(
@@ -109,6 +94,21 @@ class Crawler:
                 )
             self.db.save_to_db_to_disk()
             self.db.close()
+
+    def _create_stat_csv(self):
+        with open(STATISTICS_FILENAME, "w") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(
+                [
+                    "iterations_count",
+                    "link_between",
+                    "link_word",
+                    "url_list",
+                    "word_list",
+                    "word_location",
+                    "unique_words_count",
+                ]
+            )
 
     def async_fetch_urls(self):
         logger.debug("Starting fetch thread")
@@ -133,17 +133,15 @@ class Crawler:
                 continue
 
             urls_batch: List[LinkToGo] = self.urls_to_crawl[: self.FETCH_BATCH_SIZE]
-            # fmt: off
-            self.urls_to_crawl = self.urls_to_crawl[self.FETCH_BATCH_SIZE:]
-            # fmt: on
+            self.urls_to_crawl = self.urls_to_crawl[self.FETCH_BATCH_SIZE :]
 
             async def fetch(session: aiohttp.ClientSession, link: LinkToGo):
                 retries_count = 0
-                while retries_count < self.MAX_RETRIES_COUNT:
+                while retries_count < self.FETCH_MAX_RETRIES_COUNT:
                     try:
                         async with session.get(link.link) as response:
                             text = await response.text()
-                            logger.debug(f"fetched {link.link}")
+                            logger.debug(f"Fetched {link.link}")
                             return FetchedUrl(
                                 url=link.link, text=text, depth=link.depth
                             )
@@ -155,12 +153,11 @@ class Crawler:
                     ) as e:
                         retries_count += 1
                         logger.warning(f"{link.link} - {repr(e)} - {retries_count}")
-                        await asyncio.sleep(self.FETCH_SLEEP_INTERVAL)
+                        await asyncio.sleep(self.FETCH_EXCEPTION_SLEEP_INTERVAL)
                     except (aiohttp.TooManyRedirects, UnicodeDecodeError):
                         break
                     except Exception as e:
-                        logger.critical(e)
-                        logger.exception(e)
+                        logger.error(e)
                         break
 
                 self.error_processed_urls.append(link.link)
@@ -179,65 +176,42 @@ class Crawler:
 
             logger.info(
                 f"End fetch iteration (batch={self.FETCH_BATCH_SIZE}). "
-                f"urls_to_fetch={len(self.urls_to_crawl)} "
-                f"pages_to_process={len(self.pages_to_process)}"
+                f"len_urls_to_fetch={len(self.urls_to_crawl)} "
+                f"len_pages_to_process={len(self.pages_to_process)}"
             )
             idle_counter = 0
             await asyncio.sleep(self.IDLE_WORK_SLEEP_INTERVAL)
 
         logger.info("Finishing fetch thread ...")
 
-    @Decorators.timing
-    def _get_page(self, url: str) -> str:
-        retries_count = 0
-        while retries_count < self.MAX_RETRIES_COUNT:
-            try:
-                response = requests.get(url, timeout=10)
-                return response.text
-            except (requests.HTTPError, requests.ConnectionError) as e:
-                retries_count += 1
-                logger.warning(f"fetch '{url}' - {e} {retries_count=}")
-                time.sleep(self.SLEEP_TIMEOUT)
-                continue
-
-        logger.error(f"Max retries count exceeded - {url}")
-        self.error_processed_urls.append(url)
-        return ""
-
-    @Decorators.timing
     def _crawl_iteration(self, fetched_url: FetchedUrl):
-        current_depth = fetched_url.depth
-        url_to_process = fetched_url.url
         if self.crawl_count and self.crawl_count % self.STAT_INTERVAL == 0:
-            self.db.get_stat(self.crawl_count)
+            self.db.fill_stat(self.crawl_count)
         self.crawl_count += 1
         logger.debug(
-            f"{self.crawl_count} - Processing {url_to_process} ({fetched_url.depth}) ..."
+            f"{self.crawl_count} - Processing {fetched_url.url} ({fetched_url.depth}) ..."
         )
 
         if not fetched_url.text:
             return
 
-        elements = ParseUtils._get_childs_texts_turbo(fetched_url.text, fetched_url.url)
+        elements = self.parser.parse_text_elements(fetched_url.text)
 
         try:
-            # 1
-            # Добавляем текущую ссылку в url_list
-            current_url_id = self.db.insert_url(url_to_process)
+            fetched_url_id = self.db.insert_url(fetched_url.url)
             self.db.insert_links_from_elements(elements)
             self.db.insert_words_from_elements(elements)
-            self.db.insert_links_between_by_elements(elements, current_url_id)
-            self.db.fill_words_locations_by_elements(elements, current_url_id)
+            self.db.insert_links_between_by_elements(elements, fetched_url_id)
+            self.db.fill_words_locations_by_elements(elements, fetched_url_id)
             self.db.fill_link_words_by_elements(elements)
 
-            # Mark page as crawled
-            self.crawled_urls.append(url_to_process)
+            self.crawled_urls.append(fetched_url.url)
 
-            if current_depth + 1 > self.MAX_DEPTH:
+            if fetched_url.depth + 1 > self.MAX_DEPTH:
                 return
 
             links_to_go_next = [
-                LinkToGo(element.href, current_depth + 1)
+                LinkToGo(element.href, fetched_url.depth + 1)
                 for element in elements
                 if element.href and element.href not in self.crawled_urls
             ]
@@ -246,66 +220,53 @@ class Crawler:
             self.urls_to_crawl = list(dict.fromkeys(self.urls_to_crawl))
         except SQLAlchemyError as e:
             logger.warning(
-                f"Broken HTML with SQLLite {fetched_url.url} {fetched_url.depth} - {e}"
+                f"Failed to write to DB {fetched_url.url} {fetched_url.depth} - {e}"
             )
             self.error_processed_urls.append(fetched_url.url)
 
 
-class ParseUtils:
-    @staticmethod
-    def _get_childs_texts_turbo(text: str, base_url: str) -> List[Element]:
+class Parser:
+    def parse_text_elements(self, text: str) -> List[Element]:
         soup = BeautifulSoup(text, "html.parser")
+
         for data in soup(["style", "script", "meta", "template"]):
             data.decompose()
 
-        for element in soup(text=lambda text: isinstance(text, Comment)):
+        for element in soup(
+            text=lambda text: isinstance(text, Comment)
+        ):  # remove html comments
             element.extract()
 
-        return OmegaParser3000.merge_text_and_links(soup.find_all(), base_url)
+        return self._parse_tags(tags=soup.find_all())
 
-
-class OmegaParser3000:
-    @classmethod
-    def merge_text_and_links(cls, tags: List[bs4.Tag], base_url: str) -> List[Element]:
-        base_url = base_url.strip("/")
+    def _parse_tags(self, tags: List[bs4.Tag]) -> List[Element]:
         output_elements: List[Element] = []
 
-        for i in tags:
-            tag_text = i.find(text=True, recursive=False)
-            if not (tag_text is None):
-                words = cls.text_to_wordlist(tag_text)
-                if "u" in words:
-                    print(tag_text)
+        for tag in tags:
+            tag_text = tag.find(text=True, recursive=False)
+            if tag_text is None:
+                continue
+            words = self._text_to_words(tag_text)
+            href = ""
+            if tag.name == "a":
+                href = tag.get("href")
+                if not (href is None):
+                    if (
+                        "mailto:" in href
+                        or "tel:" in href
+                        or href.endswith((".jpg", ".png", ".gif", ".jpeg", ".pdf"))
+                        or not href.startswith("http")
+                    ):
+                        href = ""
+                    href = href.strip("/")
 
-                href = ""
-                if i.name == "a":
-                    href = i.get("href")
-                    if not (href is None):
-                        if (
-                            "mailto:" in href
-                            or "tel:" in href
-                            or href.endswith((".jpg", ".png", ".gif", ".jpeg", ".pdf"))
-                            or not href.startswith("http")
-                        ):
-                            href = ""
-                        href = href.strip("/")
-
-                for j, word in enumerate(words, start=len(output_elements)):
-                    output_elements.append(Element(word=word, location=j, href=href))
+            for i, word in enumerate(words, start=len(output_elements)):
+                output_elements.append(Element(word=word, location=i, href=href))
 
         return output_elements
 
-    @classmethod
-    def text_to_wordlist(cls, text: str) -> List[str]:
-        words = list(filter(None, re.split("[\W\d]+", text, flags=re.UNICODE)))  # noqa
+    def _text_to_words(self, text: str) -> List[str]:
+        words = list(filter(None, re.split("[\W\d]+", text, flags=re.UNICODE)))
         for i, word in enumerate(words):
             words[i] = word.lower()
         return words
-
-
-def start_crawler():
-    with contextlib.suppress(FileNotFoundError):
-        os.remove(DATABASE_FILENAME)
-        os.remove(CSV_STAT_FILENAME)
-
-    Crawler().start_crawl()

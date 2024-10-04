@@ -8,8 +8,8 @@ from loguru import logger
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.entity import Element, WordLocationsCombination
-from src.settings import DATABASE_FILENAME, IGNORED_WORDS
+from src.model import Element
+from src.settings import DATABASE_FILENAME, IGNORED_WORDS, STATISTICS_FILENAME
 
 
 class DbCreator:
@@ -29,28 +29,40 @@ class DbCreator:
     CREATE_TABLE_WORD_LOCATION = """
     CREATE TABLE IF NOT EXISTS word_location (
         id INTEGER PRIMARY KEY,
-        fkWordId INT FOREIGN KEY REFERENCES word_list(wordId) ON DELETE CASCADE ON UPDATE CASCADE,
-        fkUrlId INT FOREIGN KEY REFERENCES url_list(urlId) ON DELETE CASCADE ON UPDATE CASCADE,
+        fkWordId INT REFERENCES word_list(wordId) ON DELETE CASCADE ON UPDATE CASCADE,
+        fkUrlId INT REFERENCES url_list(urlId) ON DELETE CASCADE ON UPDATE CASCADE,
         location INT
     )
     """
     CREATE_TABLE_LINK_BETWEEN_URL = """
     CREATE TABLE IF NOT EXISTS link_between_url (
         linkId INTEGER PRIMARY KEY,
-        fkFromUrlId INT FOREIGN KEY REFERENCES url_list(urlId) ON DELETE CASCADE ON UPDATE CASCADE,
-        fkToUrlId INT FOREIGN KEY REFERENCES url_list(urlId) ON DELETE CASCADE ON UPDATE CASCADE
+        fkFromUrlId INT REFERENCES url_list(urlId) ON DELETE CASCADE ON UPDATE CASCADE,
+        fkToUrlId INT REFERENCES url_list(urlId) ON DELETE CASCADE ON UPDATE CASCADE
     )
     """
     CREATE_TABLE_LINK_WORD = """
     CREATE TABLE IF NOT EXISTS link_word (
         id INTEGER PRIMARY KEY,
-        fkWordId INT FOREIGN KEY REFERENCES word_list(wordId) ON DELETE CASCADE ON UPDATE CASCADE,
-        fkLinkId INT FOREIGN KEY REFERENCES link_between_url(linkId) ON DELETE CASCADE ON UPDATE CASCADE
+        fkWordId INT REFERENCES word_list(wordId) ON DELETE CASCADE ON UPDATE CASCADE,
+        fkLinkId INT REFERENCES link_between_url(linkId) ON DELETE CASCADE ON UPDATE CASCADE
     )
     """
 
     SELECT_TABLES_COUNT = """
     SELECT COUNT(name) FROM sqlite_master WHERE type='table'
+    """
+
+    SELECT_TOP_20_URLS = """
+    SELECT url FROM 
+        (SELECT url, count(*) as count FROM url_list GROUP BY url ORDER BY count DESC) 
+    LIMIT 20
+    """
+
+    SELECT_TOP_20_WORDS = """
+    SELECT word FROM 
+        (SELECT word, count(*) as count FROM word_list GROUP BY word ORDER BY count DESC) 
+    LIMIT 20
     """
 
     TOTAL_TABLES_COUNT = 5
@@ -77,16 +89,12 @@ class DbActor:
     INSERT INTO url_list(url) VALUES ('{url}')
     """
 
-    INSERT_INTO_URL_LIST_TURBO = """
-    INSERT INTO url_list(url) VALUES {list_of_values}
+    INSERT_INTO_URL_LIST_BATCH = """
+    INSERT INTO url_list(url) VALUES {urls}
     """
 
-    INSERT_INTO_WORD_LIST = """
-    INSERT INTO word_list(word) VALUES ('{word}')
-    """
-
-    INSERT_INTO_WORD_LIST_TURBO_FAST = """
-    INSERT INTO word_list(word) VALUES {list_of_values}
+    INSERT_INTO_WORD_LIST_BATCH = """
+    INSERT INTO word_list(word) VALUES {words}
     """
 
     INSERT_INTO_WORD_LOCATIONS = """
@@ -105,7 +113,7 @@ class DbActor:
     SELECT MAX(wordId) FROM word_list
     """
 
-    SELECT_LAST_LINK_ID = """
+    SELECT_LAST_URL_ID = """
     SELECT MAX(urlId) FROM url_list
     """
 
@@ -192,11 +200,22 @@ class DbActor:
     def close(self):
         self.db.close()
 
+    def fill_stat(self, urls_crawled: int):
+        result = self.db.execute(self.SELECT_TABLE_SIZE_STATS)
+        result = result.fetchall()
+        data = []
+        for row in result:
+            data.append((row[1], row[0]))
+
+        unique_words_count = self.db.execute(self.GET_UNIQUE_WORDS_COUNT)
+        unique_words_count = unique_words_count.fetchone()[0]
+        data.append(("unique_words_count", unique_words_count))
+
+        self._append_csv_stat(data, urls_crawled)
+
     @staticmethod
-    def append_csv_stat(data: List[Tuple[str, int]], urls_crawled: int):
-        with open(
-            "stat.csv", "a", newline=""
-        ) as csv_file:  # todo remove newline in linux
+    def _append_csv_stat(data: List[Tuple[str, int]], urls_crawled: int):
+        with open(STATISTICS_FILENAME, "a", newline="") as csv_file:
             writer = csv.writer(csv_file)
             writer.writerow(
                 (
@@ -210,29 +229,13 @@ class DbActor:
                 )
             )
 
-    def fill_stat(self, urls_crawled: int):
-        result = self.db.execute(self.SELECT_TABLE_SIZE_STATS)
-        result = result.fetchall()
-        data = []
-        for row in result:
-            data.append((row[1], row[0]))
-
-        unique_words_count = self.db.execute(self.GET_UNIQUE_WORDS_COUNT)
-        unique_words_count = unique_words_count.fetchone()[0]
-        data.append(("unique_words_count", unique_words_count))
-
-        # logger.success(
-        #     f'\n\tCrawled count: {urls_crawled}\n{tabulate(data, headers=["table_name", "rows"])}'
-        # )
-        self.append_csv_stat(data, urls_crawled)
-
     def _get_last_word_id(self) -> int:
         result = self.db.execute(self.SELECT_LAST_WORD_ID)
         result = result.fetchone()[0]
         return result
 
     def _get_last_url_id(self) -> int:
-        result = self.db.execute(self.SELECT_LAST_LINK_ID)
+        result = self.db.execute(self.SELECT_LAST_URL_ID)
         result = result.fetchone()[0]
         return result
 
@@ -273,9 +276,7 @@ class DbActor:
         list_of_values = list_of_values.strip(",")
         if not list_of_values:
             return
-        self.db.execute(
-            self.INSERT_INTO_URL_LIST_TURBO.format(list_of_values=list_of_values)
-        )
+        self.db.execute(self.INSERT_INTO_URL_LIST_BATCH.format(urls=list_of_values))
         self.db.commit()
 
     def insert_words_from_elements(self, elements: List[Element]) -> None:
@@ -291,9 +292,9 @@ class DbActor:
             last_word_id += 1
             element.word_id = last_word_id
         values_list = values_list.strip(",")
-        self.db.execute(
-            self.INSERT_INTO_WORD_LIST_TURBO_FAST.format(list_of_values=values_list)
-        )
+        if values_list == "":
+            return
+        self.db.execute(self.INSERT_INTO_WORD_LIST_BATCH.format(words=values_list))
         self.db.commit()
 
     def insert_links_between_by_elements(
@@ -319,6 +320,8 @@ class DbActor:
         for element in elements:
             values_list += f"({element.word_id}, {url_id}, {element.location}),"
         values_list = values_list.strip(",")
+        if not values_list:
+            return
         query = self.INSERT_INTO_WORD_LOCATIONS.format(list_of_values=values_list)
         self.db.execute(query)
         self.db.commit()
@@ -334,61 +337,3 @@ class DbActor:
         query = self.INSERT_INTO_LINK_WORD.format(list_of_values=list_of_values)
         self.db.execute(query)
         self.db.commit()
-
-    def get_unique_urls_ids(self) -> List[int]:
-        result = self.db.execute(self.SELECT_UNIQUE_URL_IDS)
-        results = result.fetchall()
-        result = list(zip(*results))
-        return result[0]
-
-    def get_from_urls_by_to(self, fk_to_url_id: int) -> List[int]:
-        result = self.db.execute(
-            self.SELECT_ALL_REFERENCES_TO_URL_BY_ID.format(link_to_fk=fk_to_url_id)
-        )
-        result = result.fetchall()
-        return list(itertools.chain(*result))
-
-    def get_from_url_count(self, fk_from_url_id: int) -> int:
-        result = self.db.execute(
-            self.GET_URL_LINK_COUNT.format(fk_from_url_id=fk_from_url_id)
-        ).fetchone()[0]
-        return result
-
-    def get_words_by_url(self, url_id):
-        result = self.db.execute(
-            self.SELECT_ALL_WORDS_BY_URL.format(url_id=url_id)
-        ).fetchall()
-        return list(zip(*result))[0]
-
-    # get combinations of all word locations from list on all avaliable urls
-    # returns WordLocationsCombination or null if words not specified
-    def get_words_location_combinations(self, words: List[str]):
-        if len(words) == 0:
-            return
-
-        query = f"select {words[0]}_url as url"
-        for i, word in enumerate(words):
-            query += f", {word}"
-        for i, word in enumerate(words):
-            if i == 0:
-                query += " from"
-            else:
-                query += " inner join"
-            query += (
-                f"(select {word}, fkurlid as {word}_url, location as {word}_location from word_location "
-                f"inner join (select wordid as {word} from word_list where word = '{word}') as word{i} on word{i}.{word} = fkwordid) "
-            )
-            if i > 0:
-                query += f"on {words[i-1]}_url = {words[i]}_url"
-
-        result = self.db.execute(query).fetchall()
-        self.db.commit()
-
-        combinations_list = []
-        for i in result:
-            locations_list = []
-            for j in range(len(i) - 1):
-                locations_list.append(i[j + 1])
-            combinations_list.append(WordLocationsCombination(i[0], locations_list))
-
-        return combinations_list
