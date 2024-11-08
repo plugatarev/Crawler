@@ -106,7 +106,6 @@ class Crawler:
                     "url_list",
                     "word_list",
                     "word_location",
-                    "unique_words_count",
                 ]
             )
 

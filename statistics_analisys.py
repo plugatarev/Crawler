@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from src.settings import STATISTICS_FILENAME 
 
 # Чтение данных из CSV файла
-with open('stats.csv', 'r') as f:
+with open(STATISTICS_FILENAME, 'r') as f:
     reader = csv.reader(f)
     
     # Получение данных из первой строки (имена колонок)
@@ -19,7 +19,7 @@ with open('stats.csv', 'r') as f:
         x_value = float(row[0])
         x_values.append(x_value)
         
-        for i in range(3, 4):
+        for i in range(1, 6):
             header = headers[i]
             
             if header not in y_functions:

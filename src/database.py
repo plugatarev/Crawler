@@ -8,7 +8,7 @@ from loguru import logger
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.model import Element
+from src.model import Element, ResultURL, PageRankURL, WordLocationsCombination
 from src.settings import DATABASE_FILENAME, IGNORED_WORDS, STATISTICS_FILENAME
 
 
@@ -48,6 +48,13 @@ class DbCreator:
         fkLinkId INT REFERENCES link_between_url(linkId) ON DELETE CASCADE ON UPDATE CASCADE
     )
     """
+    CREATE_TABLE_PAGE_RANK = """
+    CREATE TABLE IF NOT EXISTS page_rank (
+        id INTEGER PRIMARY KEY,
+        fkUrlId INT,
+        rank REAL
+    )
+    """
 
     SELECT_TABLES_COUNT = """
     SELECT COUNT(name) FROM sqlite_master WHERE type='table'
@@ -65,7 +72,7 @@ class DbCreator:
     LIMIT 20
     """
 
-    TOTAL_TABLES_COUNT = 5
+    TOTAL_TABLES_COUNT = 6
 
     @classmethod
     def initialize_db(cls, session) -> None:
@@ -74,6 +81,7 @@ class DbCreator:
         session.execute(cls.CREATE_TABLE_WORD_LOCATION)
         session.execute(cls.CREATE_TABLE_LINK_BETWEEN_URL)
         session.execute(cls.CREATE_TABLE_LINK_WORD)
+        session.execute(cls.CREATE_TABLE_PAGE_RANK)
 
         result = session.execute(cls.SELECT_TABLES_COUNT)
         tables_count = result.fetchone()[0]
@@ -117,21 +125,24 @@ class DbActor:
     SELECT MAX(urlId) FROM url_list
     """
 
-    SELECT_TABLE_SIZE_STATS = """
+    SELECT_LINK_BETWEEN_STATS = """
     SELECT COUNT(*), 'link_between' as temp_field FROM link_between_url
-    UNION
-    SELECT COUNT(*), 'link_word' as temp_field FROM link_word
-    UNION
-    SELECT COUNT(*), 'url_list' as temp_field FROM url_list
-    UNION
-    SELECT COUNT(*), 'word_list' as temp_field FROM word_list
-    UNION
-    SELECT COUNT(*), 'word_location' as temp_field FROM word_location
     """
 
-    GET_UNIQUE_WORDS_COUNT = """
-    SELECT COUNT(unique_word) from
-    (SELECT DISTINCT word as unique_word FROM word_list)
+    SELECT_LINK_WORD_STATS = """
+    SELECT COUNT(*), 'link_word' as temp_field FROM link_word
+    """
+
+    SELECT_URL_LIST_STATS = """
+    SELECT COUNT(*), 'url_list' as temp_field FROM url_list
+    """
+
+    SELECT_WORD_LIST_STATS = """
+    SELECT COUNT(*), 'word_list' as temp_field FROM word_list
+    """
+
+    SELECT_WORD_LOCATION_STATS = """
+    SELECT COUNT(*), 'word_location' as temp_field FROM word_location
     """
 
     SELECT_UNIQUE_URL_IDS = """
@@ -148,6 +159,79 @@ class DbActor:
 
     GET_URL_LINK_COUNT = """
     SELECT COUNT(*) FROM link_between_url WHERE fkFromUrlId = {fk_from_url_id}
+    """
+
+    GET_UNIQUE_WORDS_COUNT = """
+    SELECT COUNT(unique_word) from
+    (SELECT DISTINCT word as unique_word FROM word_list)
+    """
+
+    SELECT_UNIQUE_URL_IDS = """
+    SELECT urlId FROM url_list GROUP BY url ORDER BY urlId
+    """
+
+    INSERT_IN_RANGE_RANK_MAIN = """
+    INSERT INTO page_rank(fkUrlId, rank) VALUES {list_of_values}
+    """
+
+    INSERT_IN_RANGE_RANK_TEMP = """
+    INSERT INTO page_rank_temp(fkUrlId, rank) VALUES {list_of_values}
+    """
+
+    SELECT_ALL_REFERENCES_TO_URL_BY_ID = """
+    SELECT fkFromUrlId FROM link_between_url WHERE fkToUrlId = {link_to_fk}
+    """
+
+    SELECT_ALL_WORDS_BY_URL = """
+    SELECT word FROM word_list INNER JOIN word_location ON wordId = fkWordId where fkUrlId = {url_id}
+    """
+
+    SELECT_URL_RANK_INFO = """
+    select url_id, ref_count, rank, from_url, from_rank / count_from from url_list
+    inner join
+    (select fkFromUrlId as url_id, count(fkFromUrlId) as ref_count from link_between_url
+    where fkFromUrlId = {url_id}) as count_part
+    on count_part.url_id = urlid
+    inner join
+    (select fkUrlId, rank from page_rank where fkUrlId = {url_id}) as rank_part
+    on rank_part.fkUrlId = urlid
+    inner join
+    (select from_url, from_rank, count(*) as count_from, inner_to_part.fkToUrlId from (select distinct fkFromUrlId as from_url, page_rank.rank as from_rank, fkToUrlId from link_between_url
+    inner join page_rank on from_url = page_rank.fkUrlId where fkToUrlId = {url_id}) as inner_to_part inner join link_between_url as lbu on lbu.fkFromUrlId = from_url GROUP by lbu.fkFromUrlId) as to_part
+    on to_part.fkToUrlId = urlid
+    """
+
+    GET_URL_LINK_COUNT = """
+    SELECT COUNT(*) FROM link_between_url WHERE fkFromUrlId = {fk_from_url_id}
+    """
+
+    GET_PAGE_RANK_BY_ID = """
+    SELECT rank FROM page_rank WHERE id = {id_}
+    """
+
+    SET_PAGE_RANK_BY_ID = """
+    INSERT INTO page_rank_temp(fkUrlId, rank) VALUES ({url_id}, {rank})
+    """
+
+    SYNC_TEMP_AND_MAIN_PAGE_RANKS = """
+    UPDATE page_rank
+    SET rank = (SELECT page_rank_temp.rank
+                                FROM page_rank_temp
+                                WHERE page_rank_temp.fkUrlId = page_rank.fkUrlId)
+    """
+
+    GET_PAGE_RANK_ONE_ROW = """
+    SELECT * FROM page_rank LIMIT 1
+    """
+
+    SELECT_MAX_PAGE_RANK = """
+    SELECT rank FROM page_rank ORDER BY rank DESC LIMIT 1
+    """
+
+    GET_URLS_WITH_PAGE_RANK_IN_URL_IDS = """
+    SELECT url_list.urlId, url_list.url, page_rank.rank FROM url_list
+    INNER JOIN page_rank ON url_list.urlId = page_rank.fkUrlId
+    WHERE url_list.urlId IN {url_ids_list}
     """
 
     SQLALCHEMY_DATABASE_URL_MEMORY = "sqlite:///:memory:"
@@ -201,15 +285,23 @@ class DbActor:
         self.db.close()
 
     def fill_stat(self, urls_crawled: int):
-        result = self.db.execute(self.SELECT_TABLE_SIZE_STATS)
-        result = result.fetchall()
         data = []
-        for row in result:
-            data.append((row[1], row[0]))
 
-        unique_words_count = self.db.execute(self.GET_UNIQUE_WORDS_COUNT)
-        unique_words_count = unique_words_count.fetchone()[0]
-        data.append(("unique_words_count", unique_words_count))
+        result = self.db.execute(self.SELECT_LINK_BETWEEN_STATS)
+        result = result.fetchall()
+        data.append((result[0][1], result[0][0]))
+        result = self.db.execute(self.SELECT_LINK_WORD_STATS)
+        result = result.fetchall()
+        data.append((result[0][1], result[0][0]))
+        result = self.db.execute(self.SELECT_URL_LIST_STATS)
+        result = result.fetchall()
+        data.append((result[0][1], result[0][0]))
+        result = self.db.execute(self.SELECT_WORD_LIST_STATS)
+        result = result.fetchall()
+        data.append((result[0][1], result[0][0]))
+        result = self.db.execute(self.SELECT_WORD_LOCATION_STATS)
+        result = result.fetchall()
+        data.append((result[0][1], result[0][0]))
 
         self._append_csv_stat(data, urls_crawled)
 
@@ -225,7 +317,6 @@ class DbActor:
                     data[2][1],
                     data[3][1],
                     data[4][1],
-                    data[5][1],
                 )
             )
 
@@ -282,17 +373,28 @@ class DbActor:
     def insert_words_from_elements(self, elements: List[Element]) -> None:
         last_word_id = self._get_last_word_id() or 0
         values_list = ""
+        unique_words = dict()
         for element in elements:
             if not element.word:
                 continue
             safe_word = element.word.replace("'", "")
             if safe_word in IGNORED_WORDS:
                 continue
+            if safe_word in unique_words:
+                continue
+            already_in_db = self.db.execute(
+                f"SELECT wordId FROM word_list WHERE word = '{safe_word}'"
+            ).fetchone()
+            if already_in_db:
+                element.word_id = already_in_db[0]
+                unique_words.add(safe_word)
+                continue
             values_list += f"('{safe_word}'),"
             last_word_id += 1
             element.word_id = last_word_id
+            unique_words.add(safe_word)
         values_list = values_list.strip(",")
-        if values_list == "":
+        if not values_list:
             return
         self.db.execute(self.INSERT_INTO_WORD_LIST_BATCH.format(words=values_list))
         self.db.commit()
@@ -337,3 +439,130 @@ class DbActor:
         query = self.INSERT_INTO_LINK_WORD.format(list_of_values=list_of_values)
         self.db.execute(query)
         self.db.commit()
+
+    def get_unique_urls_ids(self) -> List[int]:
+        result = self.db.execute(self.SELECT_UNIQUE_URL_IDS)
+        results = result.fetchall()
+        result = list(zip(*results))
+        return result[0]
+
+    def fill_page_rank(self, page_ranks: List[PageRankURL]) -> None:
+        self.db.execute("delete from page_rank")
+        self.db.commit()
+
+        list_of_values = ""
+        for page in page_ranks:
+            list_of_values += f"({page.id}, {page.rank}),"
+        list_of_values = list_of_values.strip(",")
+        self.db.execute(
+            self.INSERT_IN_RANGE_RANK_MAIN.format(list_of_values=list_of_values)
+        )
+        self.db.commit()
+
+    def fill_temp_page_rank(self, entities: List[PageRankURL]) -> None:
+        list_of_values = ""
+        for entity in entities:
+            list_of_values += f"({entity.id}, {entity.rank}),"
+        list_of_values = list_of_values.strip(",")
+        self.db.execute(
+            self.INSERT_IN_RANGE_RANK_TEMP.format(list_of_values=list_of_values)
+        )
+        self.db.commit()
+
+    def get_from_urls_by_to(self, fk_to_url_id: int) -> List[int]:
+        result = self.db.execute(
+            self.SELECT_ALL_REFERENCES_TO_URL_BY_ID.format(link_to_fk=fk_to_url_id)
+        )
+        result = result.fetchall()
+        return list(itertools.chain(*result))
+
+    def get_from_url_count(self, fk_from_url_id: int) -> int:
+        result = self.db.execute(
+            self.GET_URL_LINK_COUNT.format(fk_from_url_id=fk_from_url_id)
+        ).fetchone()[0]
+        return result
+
+    def get_page_rank_by_id(self, id_: int) -> float:
+        result = self.db.execute(self.GET_PAGE_RANK_BY_ID.format(id_=id_)).fetchone()[0]
+        return result
+
+    def sync_main_and_temp_rank_tables(self) -> None:
+        self.db.execute(self.SYNC_TEMP_AND_MAIN_PAGE_RANKS)
+        self.db.commit()
+
+    def get_words_by_url(self, url_id):
+        result = self.db.execute(
+            self.SELECT_ALL_WORDS_BY_URL.format(url_id=url_id)
+        ).fetchall()
+        return list(zip(*result))[0]
+
+    # get combinations of all word locations from list on all avaliable urls
+    # returns WordLocationsCombination or null if words not specified
+    def get_words_location_combinations(self, words: List[str]):
+        if len(words) == 0:
+            return
+
+        query = f"select {words[0]}_url as url"
+        for i, word in enumerate(words):
+            query += f", {word}"
+        for i, word in enumerate(words):
+            if i == 0:
+                query += " from"
+            else:
+                query += " inner join"
+            query += (
+                f"(select {word}, fkurlid as {word}_url, location as {word}_location from word_location "
+                f"inner join (select wordid as {word} from word_list where word = '{word}') as word{i} on word{i}.{word} = fkwordid) "
+            )
+            if i > 0:
+                query += f"on {words[i-1]}_url = {words[i]}_url"
+
+        result = self.db.execute(query).fetchall()
+        self.db.commit()
+
+        combinations_list = []
+        for i in result:
+            locations_list = []
+            for j in range(len(i) - 1):
+                locations_list.append(i[j + 1])
+            combinations_list.append(WordLocationsCombination(i[0], locations_list))
+
+        return combinations_list
+
+    def get_url_page_rank_info(self, url_id):
+        result = self.db.execute(
+            self.SELECT_URL_RANK_INFO.format(url_id=url_id)
+        ).fetchall()
+        return result
+
+    def is_page_rank_table_empty(self) -> bool:
+        result = self.db.execute(self.GET_PAGE_RANK_ONE_ROW)
+        result = result.fetchone()
+        if result is None:
+            return True
+        return False
+
+    def get_max_page_rank(self) -> float:
+        result = self.db.execute(self.SELECT_MAX_PAGE_RANK)
+        result = result.fetchone()[0]
+        return result
+
+    def get_urls_with_page_ranks(self, url_ids: List[int]) -> List[ResultURL]:
+        url_ids_list_str = str(url_ids).replace("[", "(").replace("]", ")")
+        result = self.db.execute(
+            self.GET_URLS_WITH_PAGE_RANK_IN_URL_IDS.format(
+                url_ids_list=url_ids_list_str
+            )
+        )
+        result = result.fetchall()
+
+        logger.critical(len(result))
+
+        return [
+            ResultURL(
+                url_id=row[0],
+                url_name=row[1],
+                page_rank_raw_metric=row[2],
+            )
+            for row in result
+        ]
