@@ -19,7 +19,7 @@ with open(STATISTICS_FILENAME, 'r') as f:
         x_value = float(row[0])
         x_values.append(x_value)
         
-        for i in range(1, 6):
+        for i in range(4, 5):
             header = headers[i]
             
             if header not in y_functions:

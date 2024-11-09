@@ -166,8 +166,8 @@ class DbActor:
     (SELECT DISTINCT word as unique_word FROM word_list)
     """
 
-    SELECT_UNIQUE_URL_IDS = """
-    SELECT urlId FROM url_list GROUP BY url ORDER BY urlId
+    SELECT_URL_IDS = """
+    SELECT urlId FROM url_list ORDER BY urlId
     """
 
     INSERT_IN_RANGE_RANK_MAIN = """
@@ -348,7 +348,7 @@ class DbActor:
         return self.db.execute("SELECT last_insert_rowid();").fetchall()[0][0]
 
     def insert_links_from_elements(self, elements: List[Element]) -> None:
-        last_url_id = self._get_last_url_id() or 0
+        last_url_id = self._get_last_url_id() or 1
         list_of_values = ""
 
         for element in elements:
@@ -371,28 +371,31 @@ class DbActor:
         self.db.commit()
 
     def insert_words_from_elements(self, elements: List[Element]) -> None:
-        last_word_id = self._get_last_word_id() or 0
+        last_word_id = self._get_last_word_id() or 1
         values_list = ""
         unique_words = dict()
         for element in elements:
             if not element.word:
                 continue
-            safe_word = element.word.replace("'", "")
+            safe_word = element.word.replace("'", "").strip()
             if safe_word in IGNORED_WORDS:
                 continue
-            if safe_word in unique_words:
+            if safe_word in unique_words.values():
+                element.word_id = list(unique_words.keys())[
+                    list(unique_words.values()).index(safe_word)
+                ]
                 continue
             already_in_db = self.db.execute(
                 f"SELECT wordId FROM word_list WHERE word = '{safe_word}'"
             ).fetchone()
             if already_in_db:
                 element.word_id = already_in_db[0]
-                unique_words.add(safe_word)
+                unique_words[already_in_db[0]] = safe_word
                 continue
             values_list += f"('{safe_word}'),"
             last_word_id += 1
             element.word_id = last_word_id
-            unique_words.add(safe_word)
+            unique_words[last_word_id] = safe_word
         values_list = values_list.strip(",")
         if not values_list:
             return
@@ -420,6 +423,8 @@ class DbActor:
     def fill_words_locations_by_elements(self, elements: List[Element], url_id: int):
         values_list = ""
         for element in elements:
+            if element.word_id == 0:
+                continue
             values_list += f"({element.word_id}, {url_id}, {element.location}),"
         values_list = values_list.strip(",")
         if not values_list:
@@ -431,7 +436,7 @@ class DbActor:
     def fill_link_words_by_elements(self, elements: List[Element]):
         list_of_values = ""
         for element in elements:
-            if element.word and element.href:
+            if element.word and element.href and element.word_id != 0:
                 list_of_values += f"({element.word_id}, {element.link_id}),"
         list_of_values = list_of_values.strip(",")
         if not list_of_values:
@@ -440,8 +445,8 @@ class DbActor:
         self.db.execute(query)
         self.db.commit()
 
-    def get_unique_urls_ids(self) -> List[int]:
-        result = self.db.execute(self.SELECT_UNIQUE_URL_IDS)
+    def get_urls_ids(self) -> List[int]:
+        result = self.db.execute(self.SELECT_URL_IDS)
         results = result.fetchall()
         result = list(zip(*results))
         return result[0]
@@ -516,6 +521,8 @@ class DbActor:
             )
             if i > 0:
                 query += f"on {words[i-1]}_url = {words[i]}_url"
+
+        # query = f"select {words[0]}_url as url, {words[0]}, {words[1]} from (select {words[0]}, fkurlid as {words[0]}_url, location as {words[0]}_location from word_location inner join (select wordid as {words[0]} from word_list where word = '{words[0]}') as word0 on word0.{words[0]} = fkwordid) inner join (select {words[1]}, fkurlid as {words[1]}_url, location as {words[1]}_location from word_location inner join (select wordid as {words[1]} from word_list where word = '{words[1]}') as word1 on word1.{words[1]} = fkwordid) on {words[0]}_url = {words[1]}_url"
 
         result = self.db.execute(query).fetchall()
         self.db.commit()

@@ -11,7 +11,7 @@ def index():
     return """
     <form action="/get_results">
         <label for="query">Search query:</label><br>
-        <input type="text" id="query" name="query" placeholder="локоть новосибирск"><br>
+        <input type="text" id="query" name="query"><br>
         <input type="submit" value="Search">
     </form>
     """
@@ -20,7 +20,7 @@ def index():
 @app.get("/get_results")
 def get_results():
     query = request.args.get("query")
-    Searcher.search(query)
+    Searcher().search(query)
     return redirect("/results")
 
 

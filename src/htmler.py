@@ -5,7 +5,7 @@ from airium import Airium
 from src.database import DbActor
 
 
-class FancyHTMLer:
+class Htmler:
     def __init__(self) -> None:
         self.db = DbActor()
 
