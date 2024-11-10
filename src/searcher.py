@@ -66,7 +66,7 @@ class Searcher:
 
             result_urls = sorted(result_urls, key=total_rating_getter, reverse=True)
 
-            for i, url in enumerate(result_urls[:output_htmls_number], start=1):
+            for _, url in enumerate(result_urls[:output_htmls_number], start=1):
                 print(
                     f"URL ({url.url_id}): {url.url_name}, total score: {url.total_rating:.3f} (page_rank={url.page_rank_normalized_metric:.3f}, distance={url.distance_normalized_metric:.3f})"
                 )
@@ -97,6 +97,8 @@ class Searcher:
                     min_distance_list.append([i.url, 999999.9])
                     unique_ids.add(i.url)
 
+        # a10 b20 ccccccc a30 cccc a
+
         for i in min_distance_list:
             for j in combinations:
                 if j.url == i[0]:
@@ -107,9 +109,9 @@ class Searcher:
                 if i[1] > local_distance:
                     i[1] = local_distance
 
-        return self.normalized_score(min_distance_list)
+        return self.normalized_score(min_distance_list, True)
 
-    def normalized_score(self, distance_list, is_small_better=True):
+    def normalized_score(self, distance_list, is_small_better):
         columns = list(zip(*distance_list))
 
         min_score = min(columns[1])

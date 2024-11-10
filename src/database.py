@@ -509,7 +509,7 @@ class DbActor:
 
         query = f"select {words[0]}_url as url"
         for i, word in enumerate(words):
-            query += f", {word}"
+            query += f", {word}_location"
         for i, word in enumerate(words):
             if i == 0:
                 query += " from"
@@ -562,8 +562,6 @@ class DbActor:
             )
         )
         result = result.fetchall()
-
-        logger.critical(len(result))
 
         return [
             ResultURL(
